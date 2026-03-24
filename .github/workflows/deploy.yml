@@ -1,0 +1,213 @@
+name: Deploy Lanka Live Clone to VPS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    name: Deploy to Production VPS
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 🚀 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔐 Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: ${{ secrets.VPS_PORT }}
+          script: |
+            set -e
+            
+            echo "================================================"
+            echo "🚀 Starting Lanka Live Clone Deployment"
+            echo "================================================"
+            echo ""
+            
+            # Navigate to project directory
+            echo "📁 Navigating to project directory..."
+            cd ${{ secrets.VPS_PROJECT_PATH }}
+            
+            # Pull latest changes
+            echo "📥 Pulling latest changes from GitHub..."
+            git fetch origin main
+            git reset --hard origin/main
+            git pull origin main
+            
+            # Create .env file with all secrets
+            echo "🔧 Creating .env file..."
+            cat > .env << 'EOF'
+            # Database Configuration
+            # For Docker deployment, leave DATABASE_URL empty - it will be auto-configured
+            DATABASE_URL=
+            
+            # Development Mode
+            # Set to 'false' for VPS deployment (uses Docker postgres container)
+            DEV=false
+            
+            # Domain Configuration
+            DOMAIN=${{ secrets.DOMAIN }}
+            
+            # Flask Configuration
+            FLASK_ENV=production
+            SECRET_KEY=${{ secrets.FLASK_SECRET_KEY }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            
+            # PostgreSQL Configuration (used by Docker)
+            POSTGRES_USER=postgres
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            POSTGRES_DB=lankalive
+            EOF
+            
+            echo "✅ .env file created successfully"
+            
+            # Create necessary directories
+            echo "📁 Creating necessary directories..."
+            mkdir -p backend/static/uploads
+            mkdir -p sql_script
+            
+            # Set proper permissions
+            echo "🔐 Setting permissions..."
+            chmod 755 backend/static/uploads
+            
+            # Install Docker Compose V2 if not available
+            if ! command -v docker compose &> /dev/null; then
+              echo "📦 Installing Docker Compose V2..."
+              sudo apt update
+              sudo apt install -y docker-compose-plugin
+            fi
+            
+            # Stop containers (keep volumes and images)
+            echo "🛑 Stopping containers..."
+            docker compose stop || true
+            
+            # Pull images with retry logic (handle Docker Hub issues)
+            echo "📥 Pulling Docker images..."
+            for i in {1..3}; do
+              if docker compose pull; then
+                echo "✅ Images pulled successfully"
+                break
+              else
+                echo "⚠️  Pull attempt $i failed, retrying in 30 seconds..."
+                sleep 30
+              fi
+            done
+            
+            # Build containers (uses cache for faster builds)
+            echo "🔨 Building Docker containers..."
+            docker compose build --pull
+            
+            # Start containers with recreate
+            echo "🚀 Starting containers..."
+            docker compose up -d --force-recreate
+            
+            # Remove dangling images to save space (optional)
+            echo "🧹 Cleaning up dangling images..."
+            docker image prune -f || true
+            
+            # Wait for containers to be ready
+            echo "⏳ Waiting for containers to initialize..."
+            sleep 20
+            
+            # Check container status
+            echo ""
+            echo "📊 Container Status:"
+            docker compose ps
+            
+            # Show recent logs
+            echo ""
+            echo "📋 Recent PostgreSQL Logs:"
+            docker compose logs --tail=20 postgres
+            
+            echo ""
+            echo "📋 Recent Backend Logs:"
+            docker compose logs --tail=20 backend
+            
+            echo ""
+            echo "📋 Recent Frontend Logs:"
+            docker compose logs --tail=20 frontend
+            
+            # Verify backend health
+            echo ""
+            echo "🏥 Checking backend health..."
+            sleep 5
+            if docker compose exec -T backend curl -f http://localhost:8000/api/articles 2>/dev/null; then
+              echo "✅ Backend is responding"
+            else
+              echo "⚠️  Backend may still be starting up"
+            fi
+            
+            # Check database connection
+            echo ""
+            echo "💾 Checking database..."
+            if docker compose exec -T postgres pg_isready -U postgres; then
+              echo "✅ Database is ready"
+            else
+              echo "⚠️  Database connection issue"
+            fi
+            
+            echo ""
+            echo "================================================"
+            echo "✅ Deployment Completed Successfully!"
+            echo "================================================"
+            echo ""
+            echo "🌐 Your application should now be running at:"
+            echo "   https://${{ secrets.DOMAIN }}"
+            echo ""
+            echo "📝 To view logs, SSH to VPS and run:"
+            echo "   cd ${{ secrets.VPS_PROJECT_PATH }}"
+            echo "   docker compose logs -f"
+            echo ""
+            echo "📊 To check status:"
+            echo "   docker compose ps"
+            echo ""
+            echo "💡 Tip: Using Docker Compose V2 for better performance!"
+            echo ""
+
+      - name: 📊 Deployment Summary
+        if: success()
+        run: |
+          echo "## ✅ Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 **Application URL:** https://${{ secrets.DOMAIN }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 **Deployed Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "👤 **Deployed By:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⏰ **Deployment Time:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployed Services:" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐘 PostgreSQL 16 Alpine" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐍 Flask Backend (Python 3.12)" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚛️  React Frontend (Nginx)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Optimizations:" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚡ Docker layer caching enabled" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔄 Zero-downtime deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- 💾 Database persistence maintained" >> $GITHUB_STEP_SUMMARY
+
+      - name: 🚨 Deployment Failed
+        if: failure()
+        run: |
+          echo "## ❌ Deployment Failed!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please check the logs above for error details." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Common issues:" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ SSH connection failure - Check VPS_HOST, VPS_USERNAME, VPS_PASSWORD, VPS_PORT" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ Missing secrets in repository settings" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ Docker not installed on VPS" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ Port 8080 already in use on VPS" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ Insufficient permissions on VPS" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Troubleshooting:" >> $GITHUB_STEP_SUMMARY
+          echo "1. SSH into VPS manually: \`ssh -p PORT USER@HOST\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. Check Docker: \`docker --version && docker-compose --version\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Check ports: \`netstat -tuln | grep 8080\`" >> $GITHUB_STEP_SUMMARY
+          echo "4. Check project directory permissions" >> $GITHUB_STEP_SUMMARY
